@@ -1,0 +1,25 @@
+﻿{
+  "name": "docsearch-skills",
+  "version": "1.0.0",
+  "description": "docSearch-skills vectorless hierarchical document search via markdown files for Claude Code and Codex",
+  "bin": {
+    "docsearch-skills": "bin/install.js",
+    "docsearch-skills-uninstall": "bin/uninstall.js"
+  },
+  "files": [
+    "bin/",
+    "skills/"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "skills",
+    "rag",
+    "vectorless",
+    "llm"
+  ],
+  "license": "MIT"
+}
