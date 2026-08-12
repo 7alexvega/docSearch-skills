@@ -1,14 +1,18 @@
 ﻿{
   "name": "docsearch-skills",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "docSearch-skills vectorless hierarchical document search via markdown files for Claude Code and Codex",
   "bin": {
     "docsearch-skills": "bin/install.js",
     "docsearch-skills-uninstall": "bin/uninstall.js"
   },
+  "scripts": {
+    "test": "node test/run.js"
+  },
   "files": [
     "bin/",
-    "skills/"
+    "skills/",
+    "scripts/"
   ],
   "engines": {
     "node": ">=18.0.0"

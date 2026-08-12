@@ -6,7 +6,7 @@ needs: [global-rules, directory-structure, config-schema]
 
 ## Step 0 — Load shared context
 
-Read `.claude/skills/docSearch/context.md` in full before proceeding. This file contains the global rules, directory structure, and config.json schema that this skill depends on. Required sections: `global-rules`, `directory-structure`, `config-schema`.
+Read `{{DOCSEARCH_CONTEXT}}` in full before proceeding. This file contains the global rules, directory structure, and config.json schema that this skill depends on. Required sections: `global-rules`, `directory-structure`, `config-schema`.
 
 ---
 
@@ -19,7 +19,7 @@ Your job is to understand what the user wants to change, validate it, determine 
 ## Before anything else
 
 Read `config.json` from `.index/`. If it does not exist, hard stop:
-> "No index configuration found. Please run /docSearch:onboard first."
+> "No index configuration found in `<cwd>`. Please run /docSearch:onboard first."
 
 Read `document-summary-index.json` from `.index/` to understand the current index state — how many documents are indexed, what doc types exist, and what fields are currently populated. This context is needed to assess the impact of proposed changes.
 
@@ -58,12 +58,20 @@ Changes that only affect future behavior. No existing index entries are affected
 - `chunking.fallback_chunk_size_lines`
 - `chunking.max_section_size_lines`
 - `source.page_numbers_in_citations` (output preference only — does not affect existing tree indexes)
+- every field under `ingestion_quality`
 
 For Tier 1 changes, confirm and write immediately. No migration needed.
 
 > "This change only affects future behavior. Existing index entries are not affected."
 
 Note: changing `chunking` settings does not retroactively change existing tree indexes — only future ingestions will use the new values. If the user wants existing files re-chunked, they need to run `/docSearch:modify` on those files after updating the config. Tell them this.
+
+The same applies to `ingestion_quality`: thresholds are applied when a document is ingested, so raising or lowering one does not re-judge anything already in the index. `/docSearch:doctor --quality` reports which existing documents would fail the current thresholds, and `/docSearch:modify` brings a document up to them.
+
+Two things about `ingestion_quality` are worth saying when a user asks to change it:
+
+- **Nothing in it can disable structural or coverage validation.** Those are not thresholds; they are the guarantee that every line of a source is reachable by some query. If a user wants to bypass them, the honest answer is that there is no setting for it, and the underlying problem is worth diagnosing instead.
+- **Loosening `sibling_summary_similarity_max` or lowering the word minimums trades retrieval accuracy for ingestion throughput.** That is sometimes the right call for a bulk import of near-identical documents. Say what is being traded so it is a decision rather than a default.
 
 ### Tier 2 — Schema migration required
 Changes that affect the metadata fields in Document Summary Index leaf nodes. Existing leaf nodes become out of sync with the new schema.
@@ -138,6 +146,7 @@ When the user changes vault type to mixed:
 3. Identify candidate cross-type join fields from the existing schemas
 4. Define the join field mappings (label → field name per doc type)
 5. Include all of this in the config update
+6. Check `doc_summary_index.hierarchy_fields`: a homogeneous vault onboarded per `onboarding.md`'s recommendation typically omits `doc_group`/`doc_type` from it entirely, since there was only one value of each. That no longer holds once multiple doc types coexist — without `doc_group`/`doc_type` as hierarchy levels, the Document Summary Index would group documents of different doc types together with nothing structurally separating them. If they're missing, recommend inserting `doc_group` and `doc_type` at the front of `hierarchy_fields`, matching the mixed-vault convention. This is a Tier 4 change (see above) — it requires the same full Document Summary Index rebuild as any other hierarchy change, and must be confirmed and warned about the same way.
 
 Do not change vault type to mixed without at least one cross-type join field defined — a mixed vault with no join fields cannot perform cross-type queries meaningfully.
 
@@ -146,6 +155,8 @@ Warn the user:
 > "Changing to homogeneous vault type will remove all cross-type join field definitions from config. Cross-type queries will no longer work. This does not affect individual doc type schemas or existing tree indexes.
 >
 > Confirm? (yes / no)"
+
+Unlike the reverse direction, this is not a correctness issue — a homogeneous vault still works fine with `doc_group`/`doc_type` present as hierarchy levels, it's just two fixed hops that no longer narrow anything (see `onboarding.md` §2.4.1). Mention this as an optional follow-up, not something to push: they could drop `doc_group`/`doc_type` from `hierarchy_fields` for a small efficiency gain, but that's a Tier 4 change (full rebuild) on its own, and isn't worth the churn unless they're already touching the hierarchy for another reason.
 
 ### Removing a field from a doc type schema
 Confirm data loss explicitly:

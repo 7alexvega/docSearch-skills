@@ -6,7 +6,7 @@ needs: [global-rules, vocabulary, directory-structure, config-schema, document-s
 
 ## Step 0 — Load shared context
 
-Read `.claude/skills/docSearch/context.md` in full before proceeding. This file contains the global rules, vocabulary, directory structure, and all JSON schemas that this skill writes during setup. Required sections: `global-rules`, `vocabulary`, `directory-structure`, `config-schema`, `document-summary-index-schema`, `tree-index-schema`.
+Read `{{DOCSEARCH_CONTEXT}}` in full before proceeding. This file contains the global rules, vocabulary, directory structure, and all JSON schemas that this skill writes during setup. Required sections: `global-rules`, `vocabulary`, `directory-structure`, `config-schema`, `document-summary-index-schema`, `tree-index-schema`.
 
 ---
 
@@ -193,9 +193,17 @@ Introduce this section:
 
 ### 2.4.1 — Propose hierarchy fields
 
-Based on the confirmed metadata schemas, propose a hierarchy field order. The first two levels are always `doc_group` and `doc_type` — these are fixed. The user chooses what comes after.
+Based on the confirmed metadata schemas, propose a hierarchy field order.
 
-For a financial vault with fields `company`, `fiscal_year`:
+**For a mixed vault:** the first two levels default to `doc_group` and `doc_type`, since those are the only fields guaranteed to differ across doc types. The user chooses what comes after.
+
+**For a homogeneous vault:** `doc_group` and `doc_type` have exactly one value each — every document has the same one. Including them as hierarchy levels would add two fixed hops to every single query that never actually narrow anything down — pure overhead against the node budget for zero navigational benefit. Recommend skipping them as hierarchy levels entirely; the hierarchy starts directly at the first real differentiating extension field. `doc_group` and `doc_type` are still recorded on every leaf node as metadata (required by `base_schema` regardless of vault type) — they just aren't part of the tree's grouping structure. Explain this to the user:
+
+> "Since your vault only has one doc type (`user_reviews`), grouping by doc_group and doc_type first would just be two single-branch hops before reaching anything that actually splits your documents up — they'd always have exactly one child, so descending into them never narrows the search. I'd skip straight to grouping by `<first extension field>` instead. If you're planning to add other doc types to this vault later, though, keeping doc_group/doc_type as explicit levels now avoids a hierarchy change (and full rebuild) down the line — your call."
+
+This is a recommendation, not a forced default — per "Defaults are explicit," let the user consciously choose either shape.
+
+For a mixed vault with fields `company`, `fiscal_year`:
 
 > "I suggest organizing the Document Summary Index as: `doc_group → doc_type → company → fiscal_year`. This means the query skill first filters by group (financial), then type (10-K), then company (Apple), then year (2023). A query like 'Apple's Q1 2023 revenue' would navigate this hierarchy in 4 steps and reach only the relevant document — without reading any other entries.
 >
@@ -222,6 +230,8 @@ Explain:
 Ask the user to confirm or change this value.
 
 ---
+
+## Round 2.5 — Output and Citation Preferences
 
 Introduce this round:
 
@@ -324,9 +334,40 @@ Ask the user to confirm or change this value.
 
 ---
 
+## Round 3.6 — Ingestion Quality
+
+Present these as a block with their defaults rather than asking about each one. They are the thresholds the ingestion pipeline classifies and validates against, and the defaults are right for most vaults.
+
+> "Ingestion applies a quality floor. Structural correctness and complete source coverage are always enforced and cannot be turned off — a document whose content is not fully reachable is not something you can configure away. What you *can* tune is where the lines fall:
+>
+> **Source classification**
+> - `placeholder_word_threshold` — **20**. A page with fewer prose words than this and no code is treated as a placeholder and excluded.
+> - `redirect_max_prose_words` — **40**. A short page that points at another local document is recorded as an alias instead of being indexed separately.
+> - `navigation_min_links` / `navigation_max_non_link_words` — **5 / 30**. A page with at least this many links and almost no text outside them is treated as navigation and excluded.
+>
+> **Summary quality**
+> - Node summaries **15–60 words**, document summaries **30–100 words**.
+> - `sibling_summary_similarity_max` — **0.85**. Sibling sections whose summaries are more alike than this are rejected and rewritten.
+> - `root_summary_similarity_max` — **0.90**. Same rule across documents.
+> - `semantic_retry_limit` — **2**. How many times a rejected summary is regenerated before the document is left out of the index.
+>
+> **Throughput**
+> - `max_nodes_per_semantic_batch` — **12**, `max_content_characters_per_semantic_batch` — **30000**.
+>
+> Accept these defaults, or tell me which to change."
+
+Two points worth making if the user asks why any of this exists:
+
+- Excluded pages are not lost content. Redirects become aliases that queries still resolve; placeholders and navigation pages hold nothing a query could answer from. Indexing them makes routing worse, not better.
+- A document that cannot earn a specific, distinguishable summary is left out rather than indexed badly. A vague summary does not merely fail to help — it actively misroutes queries away from documents that would have answered them.
+
+If the vault is small or unusual (a handful of short reference cards, say), the placeholder threshold is the one most worth lowering. Everything else should stay at its default until there is evidence to move it.
+
+---
+
 ## Round 4 — Review and Confirm
 
-Construct the complete config.json from all confirmed answers and present it to the user in full:
+Construct the complete config.json from all confirmed answers, plus `"schema_version": 2` — this field is not asked about, it is always set to the current value the installed docSearch suite understands (see `global-rules` → "Schema version"). Include the full `ingestion_quality` block with its confirmed values, so every default is visible in the file rather than implied by its absence. Present the complete config to the user in full:
 
 > "Here is the complete configuration I will write. Please review everything carefully. Once you confirm, I will write config.json and initialize your index directory. Nothing has been written to disk yet."
 
@@ -364,7 +405,15 @@ Once the user confirms, perform these steps in order and report each one:
 
 Report: `✓ Initialized .index/document-summary-index.json`
 
-6. Report completion:
+6. Verify the pipeline scripts are reachable and the vault is writable:
+
+```
+node {{DOCSEARCH_SCRIPTS}}/selftest.js
+```
+
+Report `✓ Pipeline verified` on success. If it fails, report the failing check verbatim and stop — every other skill depends on these scripts, so a broken install is far better caught here than midway through a first ingestion. A non-zero exit here almost always means the package was installed for a different runtime than the one now running, and reinstalling with `npx docsearch-skills@latest` fixes it.
+
+7. Report completion:
    > "Setup complete. Your index is at `.index/` in the repository root.
    >
    > **Next step:** Run `/docSearch:ingest` to add documents to your index.

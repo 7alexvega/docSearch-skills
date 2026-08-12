@@ -12,9 +12,19 @@ docSearch is Designed for homogeneous vaults (one document type, like a folder o
 
 ## How it works
 
-Vectorless RAG utilizes tree index structures. The indexes are internal navigation state for LLMs. The model owns it, you interact with it normally by asking questions or queries.
+Vectorless RAG utilizes tree index structures. The indexes are internal navigation state for LLMs. You interact with it normally, by asking questions.
 
 The index lives at `.index/` in the project root. It has two tiers.
+
+### Structure is generated, not written by a model
+
+Index structure — tree shape, node ids, line ranges, page ranges, coverage, the routing index — is produced by dependency-free Node scripts that ship with the package. A model's only writable surface is the summaries and the document metadata, and those are validated mechanically before anything is published.
+
+This matters because structural defects do not fail loudly. A malformed tree index does not crash; it silently degrades retrieval weeks later, in a way that looks like a bad answer rather than bad JSON. Taking the pen away from the model removes that failure mode rather than trying to catch it.
+
+It also means Claude and Codex produce identical artifacts. Earlier versions enforced structure with Claude Code hooks, which covered only half the install matrix and only the write paths they happened to intercept. Validation now lives in the pipeline itself, so it applies on every runtime, and applies equally whether a skill, a shell, or CI invokes it.
+
+Every mutation is staged, validated, backed up, published atomically, then re-read and verified — and rolled back in full if verification fails. There is no partial-write state to clean up.
 
 ### Tier 1: Document Summary Index
 
@@ -52,23 +62,32 @@ The installer is interactive and prompts for a runtime (claude code or codex):
 When your documents (see [Other Useful tools](#other-useful-tools) ) are ready do the run the following skills first:
 
 1. `onboard`. Guided questioning to help setup tree indexes: vault source and document types, metadata schema per doc type, Document Summary Index hierarchy and node budget, chunking and query limits. Nothing is written to disk until you confirm the full config at the end.
-2. `ingest`. Pass a single file, a list of files, or a directory. Builds a tree index per document and inserts a leaf node into the Document Summary Index. Batches run in parallel.
+2. `ingest`. Pass a single file, a list of files, or a directory. It reports what it found before doing any work — including which pages it classified as redirects, placeholders, or navigation and will therefore exclude — and asks before publishing anything.
 3. `query`. Ask any question about the ingested files.
+
+If anything behaves oddly, run the install check first. It verifies the scripts are reachable, Node is new enough, the config parses, and the vault is writable:
+
+```
+node .claude/docsearch/scripts/selftest.js      # Claude, local install
+node .codex/docsearch/scripts/selftest.js       # Codex, local install
+```
 
 ## Commands
 
-Eight skills. Invoked as `/docSearch:<name>` in Claude Code or `docSearch-<name>` in Codex.
+Ten skills. Invoked as `/docSearch:<name>` in Claude Code or `docSearch-<name>` in Codex.
 
 | Command            | Description                                                                                                                                                                                                                                                                                                                              |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `onboard`          | First-time setup. Configures vault, doc types, metadata schema, hierarchy, chunking, and query limits. Writes `config.json` and initializes the `.index/` directory. Required before any other skill runs.                                                                                                                               |
-| `ingest`           | Adds documents to the index. Accepts a single file, a list, or a directory. Builds the tree index, writes node summaries, detects and resolves cross-references, then calls `rebuild-summary` internally to insert a leaf into the Document Summary Index. Existing tree indexes are not overwritten silently; use `modify` to re-index. |
-| `query`            | Answers a question from the index. Classifies the query, navigates the Document Summary Index for candidates, walks each candidate's tree index for relevant leaves, retrieves only the necessary line ranges, and synthesizes an answer with a citation trail. Returns JSON or prose per config. Pass `--deep` to double all budgets.   |
-| `modify`           | Re-indexes a single file after it has changed on disk. Internally calls `remove` then `ingest` to keep the Document Summary Index consistent.                                                                                                                                                                                            |
-| `remove`           | Removes a document from the index. Deletes its tree index file and the corresponding leaf in the Document Summary Index. Calls `rebuild-summary` internally to recompute parent summaries.                                                                                                                                               |
-| `rebuild-summary`  | Rebuilds the Document Summary Index from the tree indexes currently on disk. A recovery tool used when the Document Summary Index is out of sync. Called internally by `ingest`, `modify`, and `remove`.                                                                                                                                 |
+| `ingest`           | Adds documents to the index. Accepts a single file, a list, or a directory. Classifies each source, builds a deterministic tree index per document, generates and validates summaries, then publishes trees and routing entries in one verified transaction. Redirect, placeholder, and navigation-only pages are excluded by design and reported. Use `modify` to re-index something already indexed. |
+| `query`            | Answers a question from the index. Classifies the query, navigates the Document Summary Index for candidates, walks each candidate's tree index for relevant leaves, retrieves only the necessary line ranges, and synthesizes an answer with a citation trail. Returns JSON or prose per config. Pass `--deep` to double all budgets, `--verify` to force a blind citation-faithfulness check (runs automatically when confidence comes out partial/low or the query is cross-type).                        |
+| `modify`           | Re-indexes a file that changed on disk. A single transaction — the replacement is built and validated in staging before the old entry is displaced, so a failure never leaves the document missing. Also the upgrade path for documents indexed by an older pipeline version.                                                       |
+| `remove`           | Removes a document from the index. Builds and validates the next routing index, backs up everything at risk, then publishes and verifies. Tree files are moved to a backup rather than deleted. The source markdown is untouched.                                                                                                    |
+| `rebuild-summary`  | Rebuilds the Document Summary Index from the tree indexes currently on disk. A recovery tool for when the routing index is missing, corrupted, or out of step with `.index/trees/`. Trees carry their own routing metadata, so the rebuild recovers it rather than re-deriving it. Tree indexes are never modified.                 |
 | `config-update`    | Changes any setting in `config.json`. Detects whether the change affects the schema; if so, recommends running `schema-migration` afterward. Changing the Document Summary Index hierarchy order requires a full index rebuild.                                                                                                          |
 | `schema-migration` | Updates existing Document Summary Index leaf nodes after a schema change. Always run via this skill, never by hand.                                                                                                                                                                                                                      |
+| `doctor`           | Read-only health check of the index. Default mode reads the Document Summary Index and a directory listing for cheap checks (document counts, orphaned or dangling entries, unknown groupings, null metadata); `--deep` also parses every tree index, confirms source files still exist, and flags stale ones. Never repairs anything itself. |
+| `sync`             | Reconciles the index against the vault directory: files on disk but not indexed, indexed files that changed since ingestion (via the staleness fingerprint), and indexed files whose source is gone. Reports the diff, then delegates to `ingest`/`modify`/`remove` per category after confirmation.                                   |
 
 ## Configuration
 
@@ -104,6 +123,26 @@ All settings live in `.index/config.json`. Never edit it manually. Use `config-u
 | --------------------------- | ------- | --------------------------------------------------------- |
 | `fallback_chunk_size_lines` | 150     | Chunk size for files with no headings.                    |
 | `max_section_size_lines`    | 200     | Split sections longer than this even if a heading exists. |
+
+### `ingestion_quality`
+
+The thresholds ingestion classifies and validates against. Every field is optional — an absent field takes its default, so an older config needs no migration.
+
+| Field                                       | Default | Description                                                                                       |
+| ------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------- |
+| `placeholder_word_threshold`                | 20      | Below this many prose words, with no code, a page is a placeholder and is excluded.               |
+| `redirect_max_prose_words`                  | 40      | A short page pointing at another local document becomes an alias instead of its own entry.        |
+| `navigation_min_links`                      | 5       | With at least this many links and little text outside them, a page is navigation and is excluded. |
+| `navigation_max_non_link_words`             | 30      | The "little text" half of that rule.                                                              |
+| `node_summary_min_words` / `_max_words`     | 15 / 60 | Length bounds for section summaries.                                                              |
+| `root_summary_min_words` / `_max_words`     | 30 / 100 | Length bounds for document summaries.                                                            |
+| `sibling_summary_similarity_max`            | 0.85    | Sibling sections whose summaries are more alike than this are rejected and rewritten.             |
+| `root_summary_similarity_max`               | 0.9     | The same rule across documents.                                                                   |
+| `semantic_retry_limit`                      | 2       | Regeneration attempts before a document is left out of the index.                                 |
+| `max_nodes_per_semantic_batch`              | 12      | Work-batch size.                                                                                  |
+| `max_content_characters_per_semantic_batch` | 30000   | Work-batch character budget.                                                                      |
+
+Structural correctness and complete source coverage are always enforced and have no setting. A document whose content is not fully reachable by some query is a defect, not a preference.
 
 ### `doc_summary_index`
 
@@ -178,8 +217,15 @@ my-vault/                       project root; run Claude Code or Codex here
     raw-pdfs/                   PDFs you want to convert
     ingestion/                  markdown sources, organized by doc type
       <doc-type>/
-  .index/                       generated; LLM navigation state, do not edit
+  .index/                       generated; navigation state, do not edit by hand
+    config.json
+    document-summary-index.json routing index
+    aliases.json                redirect paths → canonical documents
+    trees/                      one tree index per document
+    staging/<run-id>/           per-run working state, backups, transaction log
   .claude/ or .codex/           installed by npx docsearch-skills@latest
+    commands|skills/            the skills themselves
+    docsearch/scripts/          the pipeline
 ```
 
 Open `data/` as the Obsidian vault. Run Claude Code or Codex from `my-vault/` (the project root), not from `data/`. The `.index/` directory and the installed skills sit outside the Obsidian vault, so they do not pollute search or graph view.

@@ -99,6 +99,73 @@ function removeEmptyDirsUntil(startDir, stopDir) {
 }
 
 // ---------------------------------------------------------------------------
+// Hook un-merge: removes exactly the hook entries this package recorded in
+// its own manifest from settings.json, leaving any unrelated hooks or other
+// settings the user configured completely untouched.
+// ---------------------------------------------------------------------------
+function readJSONSafe(filePath) {
+  if (!fs.existsSync(filePath)) return { value: null, existed: false, malformed: false };
+  try {
+    return { value: JSON.parse(fs.readFileSync(filePath, 'utf8')), existed: true, malformed: false };
+  } catch (err) {
+    return { value: null, existed: true, malformed: true, error: err };
+  }
+}
+
+function removeDeepEqual(arr, items) {
+  if (!Array.isArray(items) || items.length === 0) return arr;
+  const serialized = items.map(i => JSON.stringify(i));
+  return arr.filter(x => !serialized.includes(JSON.stringify(x)));
+}
+
+function unmergePermissionsFromSettings(settingsPath, prevPermissions) {
+  if (!prevPermissions || !prevPermissions.length || !settingsPath) return { ok: true };
+  const { value, existed, malformed } = readJSONSafe(settingsPath);
+  if (!existed) return { ok: true };
+  if (malformed) {
+    return { ok: false, message: `${settingsPath} is not valid JSON — could not remove docSearch's permission entries automatically. Remove them by hand.` };
+  }
+  const settings = value;
+  if (!settings.permissions || !Array.isArray(settings.permissions.allow)) return { ok: true };
+
+  settings.permissions.allow = settings.permissions.allow.filter(p => !prevPermissions.includes(p));
+  if (settings.permissions.allow.length === 0) delete settings.permissions.allow;
+  if (Object.keys(settings.permissions).length === 0) delete settings.permissions;
+
+  try {
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  } catch (err) {
+    return { ok: false, message: `Failed writing ${settingsPath}: ${err.message}` };
+  }
+  return { ok: true };
+}
+
+function unmergeHooksFromSettings(settingsPath, prevHooks) {
+  if (!prevHooks || !settingsPath) return { ok: true };
+  const { value, existed, malformed } = readJSONSafe(settingsPath);
+  if (!existed) return { ok: true };
+  if (malformed) {
+    return { ok: false, message: `${settingsPath} is not valid JSON — could not remove docSearch's hook entries automatically. Remove them by hand.` };
+  }
+  const settings = value;
+  if (!settings.hooks || typeof settings.hooks !== 'object') return { ok: true };
+
+  for (const event of ['PreToolUse', 'PostToolUse', 'SessionStart']) {
+    if (!Array.isArray(settings.hooks[event]) || !Array.isArray(prevHooks[event])) continue;
+    settings.hooks[event] = removeDeepEqual(settings.hooks[event], prevHooks[event]);
+    if (settings.hooks[event].length === 0) delete settings.hooks[event];
+  }
+  if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+
+  try {
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  } catch (err) {
+    return { ok: false, message: `Failed writing ${settingsPath}: ${err.message}` };
+  }
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
 // Uninstall one manifest entry
 // ---------------------------------------------------------------------------
 function uninstall(manifestPath) {
@@ -129,6 +196,44 @@ function uninstall(manifestPath) {
     try {
       if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
     } catch (_) {}
+  }
+
+  // Also clean up the hooks dir, which lives outside commandsDir
+  // (.claude/hooks/docSearch rather than .claude/commands/docSearch), and has
+  // its own lib/ subdirectory that needs removing before its parent will
+  // read as empty.
+  if (manifest.hooksDir) {
+    const libDir = path.join(manifest.hooksDir, 'lib');
+    try {
+      if (fs.existsSync(libDir) && fs.readdirSync(libDir).length === 0) fs.rmdirSync(libDir);
+    } catch (_) {}
+    if (fs.existsSync(manifest.hooksDir)) {
+      removeEmptyDirsUntil(manifest.hooksDir, path.dirname(path.dirname(manifest.hooksDir)));
+    }
+  }
+
+  // Clean up the scripts dir, which like hooksDir lives outside commandsDir and
+  // has a lib/ subdirectory that must go before its parent reads as empty.
+  if (manifest.scriptsDir) {
+    const libDir = path.join(manifest.scriptsDir, 'lib');
+    try {
+      if (fs.existsSync(libDir) && fs.readdirSync(libDir).length === 0) fs.rmdirSync(libDir);
+    } catch (_) {}
+    if (fs.existsSync(manifest.scriptsDir)) {
+      removeEmptyDirsUntil(manifest.scriptsDir, path.dirname(path.dirname(manifest.scriptsDir)));
+    }
+  }
+
+  // Un-merge this install's hook entries from settings.json
+  if (manifest.hooks) {
+    const result = unmergeHooksFromSettings(manifest.settingsPath, manifest.hooks);
+    if (!result.ok) failures.push({ filePath: manifest.settingsPath, message: result.message });
+  }
+
+  // Un-merge this install's permission entries from settings.json
+  if (manifest.permissions) {
+    const result = unmergePermissionsFromSettings(manifest.settingsPath, manifest.permissions);
+    if (!result.ok) failures.push({ filePath: manifest.settingsPath, message: result.message });
   }
 
   // Remove the manifest itself

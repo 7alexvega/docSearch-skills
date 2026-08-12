@@ -6,7 +6,7 @@ needs: [global-rules, vocabulary, directory-structure, config-schema, document-s
 
 ## Step 0 — Load shared context
 
-Read `.claude/skills/docSearch/context.md` in full before proceeding. This file contains the global rules, vocabulary, directory structure, and all JSON schemas that this skill reads and updates. Required sections: `global-rules`, `vocabulary`, `directory-structure`, `config-schema`, `document-summary-index-schema`, `tree-index-schema`.
+Read `{{DOCSEARCH_CONTEXT}}` in full before proceeding. This file contains the global rules, vocabulary, directory structure, and all JSON schemas that this skill reads and updates. Required sections: `global-rules`, `vocabulary`, `directory-structure`, `config-schema`, `document-summary-index-schema`, `tree-index-schema`.
 
 ---
 
@@ -19,7 +19,7 @@ Schema migration is a recovery and consistency operation. The goal is to bring e
 ## Before anything else
 
 Read `config.json` from `.index/`. If it does not exist, hard stop:
-> "No index configuration found. Please run /docSearch:onboard first."
+> "No index configuration found in `<cwd>`. Please run /docSearch:onboard first."
 
 Read `document-summary-index.json` from `.index/`. If it does not exist, hard stop:
 > "document-summary-index.json not found. Run /docSearch:onboard to initialize the index."
@@ -82,7 +82,7 @@ If the user says no, note that the obsolete field will be left in place. It will
 
 ## Step 3 — Auto-populate missing fields
 
-For each missing field across affected entries, attempt to infer the value by reading the corresponding tree index file.
+For each affected entry with missing fields, infer the values by reading its corresponding tree index file. If more than one entry is affected, spawn one sub-agent per entry, all in parallel — this is read-only work, each sub-agent reads only its own tree index file and there's no shared state to coordinate, so it's safe to fan out the same way ingestion parallelizes per-file tree building. For a single affected entry, just do the inference directly. Either way, each entry's inference uses the same logic:
 
 **How to infer values from tree indexes:**
 
@@ -101,7 +101,7 @@ For each field, apply judgment:
 
 **Confidence threshold:** only populate a value if you are confident it is correct. If the evidence is ambiguous or absent, mark the field as `null` and flag it for manual review. Never guess to avoid a null.
 
-Build a review manifest of all inferred values and all nulls before writing anything. This is presented to the user in Step 4.
+Collect every entry's inferred values and nulls (from sub-agents if parallelized, or directly otherwise) into one review manifest before writing anything. This is presented to the user in Step 4.
 
 ---
 
